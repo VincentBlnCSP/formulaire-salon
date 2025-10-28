@@ -142,6 +142,310 @@
       return searchParams.toString();
     }
 
+    function normalizeAddress(value) {
+      if (!value) return "";
+      return String(value)
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/[^0-9A-Z]/gi, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .toUpperCase();
+    }
+
+    function filterResultsByAddress(items, filterConfig = {}) {
+      if (!Array.isArray(items) || items.length === 0) {
+        return [];
+      }
+
+      const {
+        label = "",
+        street = "",
+        housenumber = "",
+        city = "",
+        postcode = "",
+        relaxNumber = false,
+        ignoreCityMismatch = false,
+        allowLabelMatch = false,
+        requirePostcodeMatch = false,
+      } = filterConfig;
+
+      const normalizedStreetWithNumber = normalizeAddress([housenumber, street].filter(Boolean).join(" "));
+      const normalizedStreet = normalizeAddress(street);
+      const normalizedCity = normalizeAddress(city);
+      const normalizedLabel = normalizeAddress(label);
+      const normalizedPostcode = normalizeAddress(postcode);
+
+      return items.filter((item) => {
+        const siege = item.siege || {};
+        const addressLines = [
+          siege.adresse_ligne_1,
+          siege.adresse_ligne_2,
+          siege.adresse_ligne_3,
+          siege.adresse_ligne_4,
+          siege.adresse_ligne_5,
+          siege.adresse_ligne_6,
+          [siege.code_postal, siege.ville].filter(Boolean).join(" "),
+        ]
+          .map(normalizeAddress)
+          .filter(Boolean);
+
+        if (addressLines.length === 0) {
+          return false;
+        }
+
+        let matchesStreet = false;
+        if (normalizedStreetWithNumber) {
+          matchesStreet = addressLines.some((line) => line.includes(normalizedStreetWithNumber));
+        }
+
+        if (!matchesStreet && relaxNumber && normalizedStreet) {
+          matchesStreet = addressLines.some((line) => line.includes(normalizedStreet));
+        }
+
+        if (!matchesStreet && allowLabelMatch && normalizedLabel) {
+          matchesStreet = addressLines.some((line) => line.includes(normalizedLabel));
+        }
+
+        if (!matchesStreet) {
+          return false;
+        }
+
+        if (requirePostcodeMatch && normalizedPostcode) {
+          const candidatePostcode = normalizeAddress(siege.code_postal || "");
+          if (!candidatePostcode || candidatePostcode !== normalizedPostcode) {
+            return false;
+          }
+        }
+
+        if (normalizedCity && !ignoreCityMismatch) {
+          const candidateCity = normalizeAddress(siege.ville || "");
+          if (!candidateCity) {
+            return false;
+          }
+          const cityMatches =
+            candidateCity === normalizedCity ||
+            candidateCity.includes(normalizedCity) ||
+            normalizedCity.includes(candidateCity);
+          if (!cityMatches) {
+            return false;
+          }
+        }
+
+        return true;
+      });
+    }
+
+    function renderResults(items) {
+      if (!Array.isArray(items) || items.length === 0) {
+        resultsEl.innerHTML = "<p>Aucune entreprise trouvée</p>";
+        return;
+      }
+
+      const dentalItems = [];
+      const otherItems = [];
+
+      items
+        .filter((item) => !currentSelection || item.siren !== currentSelection.siren)
+        .forEach((item) => {
+          const codeNAF = item.code_naf || "";
+          const libelleNAF = item.libelle_code_naf || "Activité inconnue";
+          const activite = codeNAF ? `${codeNAF} - ${libelleNAF}` : libelleNAF;
+          const siege = item.siege || {};
+          const adresseParts = [];
+          if (siege.adresse_ligne_1) {
+            adresseParts.push(siege.adresse_ligne_1);
+          }
+          const cpVille = `${(siege.code_postal || "").trim()} ${(siege.ville || "").trim()}`.trim();
+          if (cpVille) {
+            adresseParts.push(cpVille);
+          }
+          const adresse = adresseParts.join(", ");
+
+          const isDental = codeNAF.startsWith("86");
+          const style = isDental ? "color:green; font-weight:bold;" : "";
+
+          const html = `
+      <div class="item"
+           data-siren="${escapeAttr(item.siren || "")}" 
+           data-name="${escapeAttr(item.nom_entreprise || "")}"
+           data-activite="${escapeAttr(activite)}"
+           data-adresse="${escapeAttr(adresse)}">
+        <strong>${escapeHtml(item.nom_entreprise || "")}</strong><br>
+        <small style="${style}">${escapeHtml(activite)}</small><br>
+        <small>${escapeHtml(adresse)}</small><br>
+      </div>
+    `;
+
+          if (isDental) {
+            dentalItems.push(html);
+          } else {
+            otherItems.push(html);
+          }
+        });
+
+      let pinned = "";
+      if (currentSelection) {
+        pinned = `
+    <div class="item selected-item"
+         data-siren="${escapeAttr(currentSelection.siren || "")}" 
+         data-name="${escapeAttr(currentSelection.name)}"
+         data-activite="${escapeAttr(currentSelection.activite || "")}" 
+         data-adresse="${escapeAttr(currentSelection.adresse || "")}">
+      <strong>${escapeHtml(currentSelection.name)}</strong><br>
+      <small>${escapeHtml(currentSelection.activite || "")}</small><br>
+      <small>${escapeHtml(currentSelection.adresse || "")}</small><br>
+    </div>
+  `;
+      }
+
+      resultsEl.innerHTML = pinned + dentalItems.join("") + otherItems.join("");
+    }
+
+    function createAddressSearchAttempts(addressData = {}) {
+      const base = {
+        label: addressData.label || "",
+        housenumber: addressData.housenumber || "",
+        street: addressData.street || "",
+        postcode: addressData.postcode || "",
+        city: addressData.city || "",
+      };
+
+      const attempts = [];
+      const seen = new Set();
+
+      const streetLine = [base.housenumber, base.street].filter(Boolean).join(" ").trim();
+      const labelFallback = [streetLine, base.postcode, base.city].filter(Boolean).join(" ").trim() || base.label;
+      const queryWithCity = [streetLine, base.city].filter(Boolean).join(" ").trim();
+      const queryWithPostcode = [streetLine, base.postcode].filter(Boolean).join(" ").trim();
+
+      function pushAttempt(rawParams, filterOverrides) {
+        const paramsCopy = { ...rawParams };
+        Object.keys(paramsCopy).forEach((key) => {
+          if (typeof paramsCopy[key] === "string") {
+            const trimmed = paramsCopy[key].trim();
+            if (!trimmed) {
+              delete paramsCopy[key];
+            } else {
+              paramsCopy[key] = trimmed;
+            }
+          }
+        });
+
+        const prepared = buildPappersParams(paramsCopy);
+        if (!prepared) return;
+
+        const signature = JSON.stringify(prepared);
+        const filterConfig = filterOverrides
+          ? { ...base, ...filterOverrides }
+          : null;
+        const signatureKey = `${signature}::${filterConfig ? JSON.stringify(filterOverrides) : ""}`;
+        if (seen.has(signatureKey)) return;
+        seen.add(signatureKey);
+
+        attempts.push({
+          params: paramsCopy,
+          addressFilter: filterConfig,
+          signature,
+        });
+      }
+
+      if (streetLine) {
+        pushAttempt(
+          {
+            adresse: streetLine,
+            code_postal: base.postcode,
+            ville: base.city,
+            q: queryWithPostcode || labelFallback || base.label,
+          },
+          { relaxNumber: false }
+        );
+        pushAttempt(
+          {
+            adresse: streetLine,
+            code_postal: base.postcode,
+            ville: base.city,
+            q: queryWithPostcode || labelFallback || base.label,
+          },
+          { relaxNumber: true }
+        );
+        pushAttempt(
+          {
+            adresse: streetLine,
+            code_postal: base.postcode,
+            ville: base.city,
+            q: queryWithPostcode || labelFallback || base.label,
+          },
+          { relaxNumber: true, ignoreCityMismatch: true }
+        );
+      }
+
+      if (streetLine) {
+        pushAttempt(
+          {
+            adresse: streetLine,
+            ville: base.city,
+            q: queryWithCity || labelFallback || base.label,
+          },
+          { relaxNumber: false }
+        );
+        pushAttempt(
+          {
+            adresse: streetLine,
+            ville: base.city,
+            q: queryWithCity || labelFallback || base.label,
+          },
+          { relaxNumber: true }
+        );
+        pushAttempt(
+          {
+            adresse: streetLine,
+            ville: base.city,
+            q: queryWithCity || labelFallback || base.label,
+          },
+          { relaxNumber: true, ignoreCityMismatch: true }
+        );
+      }
+
+      if (streetLine) {
+        pushAttempt(
+          {
+            q: [streetLine, base.postcode].filter(Boolean).join(" "),
+          },
+          { relaxNumber: true, ignoreCityMismatch: true }
+        );
+      }
+
+      if (streetLine) {
+        pushAttempt(
+          {
+            q: [streetLine, base.city].filter(Boolean).join(" "),
+          },
+          { relaxNumber: true }
+        );
+        pushAttempt(
+          {
+            q: [streetLine, base.city].filter(Boolean).join(" "),
+          },
+          { relaxNumber: true, ignoreCityMismatch: true }
+        );
+      }
+
+      if (labelFallback || base.label) {
+        const finalLabel = base.label || labelFallback;
+        pushAttempt(
+          { q: finalLabel },
+          { relaxNumber: true, allowLabelMatch: true, ignoreCityMismatch: true }
+        );
+      }
+
+      if (streetLine) {
+        pushAttempt({ q: streetLine }, null);
+      }
+
+      return attempts;
+    }
+
     // --- Autocomplete BAN ---
     async function autocompleteBAN(query) {
       if (query.length < 3) {
@@ -174,12 +478,25 @@
     }
 
     // --- Recherche Pappers ---
-    async function searchPappers(rawParams = {}, { fallbackParams } = {}) {
+    async function searchPappers(rawParams = {}, options = {}) {
+      const fallbackQueue = Array.isArray(options.fallbacks) ? [...options.fallbacks] : [];
       const params = buildPappersParams(rawParams);
+
       if (!params) {
-        resultsEl.innerHTML = "";
+        if (fallbackQueue.length > 0) {
+          const nextAttempt = fallbackQueue.shift();
+          searchPappers(nextAttempt.params, {
+            addressFilter: nextAttempt.addressFilter,
+            fallbacks: fallbackQueue,
+            signature: nextAttempt.signature,
+          });
+        } else {
+          resultsEl.innerHTML = "";
+        }
         return;
       }
+
+      const signature = options.signature || JSON.stringify(params);
 
       if (currentFetchController) currentFetchController.abort();
       currentFetchController = new AbortController();
@@ -192,90 +509,48 @@
         const res = await fetch(url, { signal: currentFetchController.signal });
         const data = await res.json();
 
-        const items = data.resultats || [];
-        if (items.length === 0) {
-          if (fallbackParams) {
-            searchPappers(fallbackParams);
+        const items = Array.isArray(data.resultats) ? data.resultats : [];
+
+        let filteredItems = options.addressFilter
+          ? filterResultsByAddress(items, options.addressFilter)
+          : items;
+
+        if (filteredItems.length === 0) {
+          while (fallbackQueue.length > 0) {
+            const nextAttempt = fallbackQueue.shift();
+
+            if (nextAttempt.signature && nextAttempt.signature === signature) {
+              const reuseFiltered = nextAttempt.addressFilter
+                ? filterResultsByAddress(items, nextAttempt.addressFilter)
+                : items;
+              if (reuseFiltered.length > 0) {
+                renderResults(reuseFiltered);
+                return;
+              }
+              continue;
+            }
+
+            searchPappers(nextAttempt.params, {
+              addressFilter: nextAttempt.addressFilter,
+              fallbacks: fallbackQueue,
+              signature: nextAttempt.signature,
+            });
             return;
           }
+
           resultsEl.innerHTML = "<p>Aucune entreprise trouvée</p>";
           return;
         }
 
-   // 1) Construire la liste des résultats normalement,
-//    en excluant le doublon si c'est l'entreprise sélectionnée
-// Sépare en deux listes
-const dentalItems = [];
-const otherItems = [];
-
-items
-  .filter(item => !currentSelection || item.siren !== currentSelection.siren)
-  .forEach(item => {
-    const codeNAF = item.code_naf || "";
-    const libelleNAF = item.libelle_code_naf || "Activité inconnue";
-    const activite = codeNAF ? `${codeNAF} - ${libelleNAF}` : libelleNAF;
-    const siege = item.siege || {};
-    const adresseParts = [];
-    if (siege.adresse_ligne_1) {
-      adresseParts.push(siege.adresse_ligne_1);
-    }
-    const cpVille = `${(siege.code_postal || "").trim()} ${(siege.ville || "").trim()}`.trim();
-    if (cpVille) {
-      adresseParts.push(cpVille);
-    }
-    const adresse = adresseParts.join(", ");
-
-    const isDental = codeNAF.startsWith("86"); 
-    const style = isDental ? "color:green; font-weight:bold;" : "";
-
-    const html = `
-      <div class="item"
-           data-siren="${item.siren}"
-           data-name="${escapeAttr(item.nom_entreprise || "")}" 
-           data-activite="${escapeAttr(activite)}" 
-           data-adresse="${escapeAttr(adresse)}">
-        <strong>${escapeHtml(item.nom_entreprise || "")}</strong><br>
-        <small style="${style}">${escapeHtml(activite)}</small><br>
-        <small>${escapeHtml(adresse)}</small><br>
-      </div>
-    `;
-
-    if (isDental) {
-      dentalItems.push(html); // en haut
-    } else {
-      otherItems.push(html);
-    }
-  });
-
-// 1) Construire le bloc "pinned" si sélection
-let pinned = "";
-if (currentSelection) {
-  pinned = `
-    <div class="item selected-item"
-         data-siren="${currentSelection.siren}"
-         data-name="${escapeAttr(currentSelection.name)}"
-         data-activite="${escapeAttr(currentSelection.activite || "")}" 
-         data-adresse="${escapeAttr(currentSelection.adresse || "")}">
-      <strong>${escapeHtml(currentSelection.name)}</strong><br>
-      <small>${escapeHtml(currentSelection.activite || "")}</small><br>
-      <small>${escapeHtml(currentSelection.adresse || "")}</small><br>
-    </div>
-  `;
-}
-
-// 2) Injecter dans l’ordre : pinned (si existe) → dental → autres
-resultsEl.innerHTML = pinned + dentalItems.join("") + otherItems.join("");
-
-
-
-
+        renderResults(filteredItems);
       } catch (err) {
         if (err.name === "AbortError") return;
         console.error("Erreur Pappers:", err);
         resultsEl.innerHTML = "<p>⚠️ Erreur de recherche</p>";
+      } finally {
+        currentFetchController = null;
       }
     }
-
     // --- Raccrocher la recherche avec debounce ---
     function attachSearch(inputId) {
       const input = document.getElementById(inputId);
@@ -307,17 +582,28 @@ resultsEl.innerHTML = pinned + dentalItems.join("") + otherItems.join("");
       inputAdresse.value = selectedAddress;
       banSuggestionsEl.innerHTML = "";
 
-      const adresse = [div.dataset.housenumber, div.dataset.street].filter(Boolean).join(" ") || selectedAddress;
-      const fallbackQuery = selectedAddress || adresse;
-      const params = {
-        adresse,
-        code_postal: div.dataset.postcode || "",
-        ville: div.dataset.city || "",
-        q: fallbackQuery,
+      const addressContext = {
+        label: selectedAddress,
+        housenumber: div.dataset.housenumber || "",
+        street: div.dataset.street || "",
+        postcode: div.dataset.postcode || "",
+        city: div.dataset.city || "",
       };
 
-      searchPappers(params, {
-        fallbackParams: fallbackQuery ? { q: fallbackQuery } : undefined,
+      const attempts = createAddressSearchAttempts(addressContext);
+
+      if (!attempts.length) {
+        if (addressContext.label) {
+          searchPappers({ q: addressContext.label });
+        }
+        return;
+      }
+
+      const [firstAttempt, ...fallbackAttempts] = attempts;
+      searchPappers(firstAttempt.params, {
+        addressFilter: firstAttempt.addressFilter,
+        fallbacks: fallbackAttempts,
+        signature: firstAttempt.signature,
       });
     });
 
