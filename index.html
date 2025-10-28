@@ -73,6 +73,417 @@
     let currentSelection = null;
     let debounceTimer;
     let currentFetchController = null;
+    let selectedAddressContext = null;
+    let currentReasonValue = "";
+
+    function escapeHtml(value = "") {
+      const str = typeof value === "string" ? value : String(value);
+      return str
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+
+    function escapeAttr(value = "") {
+      return escapeHtml(value).replace(/`/g, "&#96;");
+    }
+
+    function buildPappersParams(rawParams = {}) {
+      const params = {};
+
+      if (typeof rawParams.q === "string") {
+        const trimmed = rawParams.q.trim();
+        if (trimmed.length >= 2) params.q = trimmed;
+      }
+
+      if (typeof rawParams.adresse === "string") {
+        const trimmed = rawParams.adresse.trim();
+        if (trimmed.length >= 3) params.adresse = trimmed;
+      }
+
+      if (typeof rawParams.code_postal === "string") {
+        const trimmed = rawParams.code_postal.trim();
+        if (trimmed.length >= 3) params.code_postal = trimmed;
+      }
+
+      if (typeof rawParams.ville === "string") {
+        const trimmed = rawParams.ville.trim();
+        if (trimmed.length >= 2) params.ville = trimmed;
+      }
+
+      if (typeof rawParams.code_naf === "string") {
+        const trimmed = rawParams.code_naf.trim();
+        if (trimmed) params.code_naf = trimmed;
+      }
+
+      if (rawParams.taille) {
+        params.taille = String(rawParams.taille);
+      }
+
+      if (!params.taille) {
+        params.taille = DEFAULT_RESULT_SIZE;
+      }
+
+      const hasSearchCriteria = params.q || params.adresse || params.code_postal || params.ville;
+      if (!hasSearchCriteria) {
+        return null;
+      }
+
+      return params;
+    }
+
+    function buildQueryString(params) {
+      const searchParams = new URLSearchParams();
+      Object.entries(params).forEach(([key, value]) => {
+        if (value !== undefined && value !== null && value !== "") {
+          searchParams.append(key, value);
+        }
+      });
+      return searchParams.toString();
+    }
+
+    function composeQuery(...parts) {
+      return parts
+        .filter((part) => typeof part === "string" && part.trim().length > 0)
+        .map((part) => part.trim())
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim();
+    }
+
+    function normalizeAddress(value) {
+      if (!value) return "";
+      return String(value)
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/[^0-9A-Z]/gi, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .toUpperCase();
+    }
+
+    function filterResultsByAddress(items, filterConfig = {}) {
+      if (!Array.isArray(items) || items.length === 0) {
+        return [];
+      }
+
+      const {
+        label = "",
+        street = "",
+        housenumber = "",
+        city = "",
+        postcode = "",
+        relaxNumber = false,
+        ignoreCityMismatch = false,
+        allowLabelMatch = false,
+        requirePostcodeMatch = false,
+      } = filterConfig;
+
+      const normalizedStreetWithNumber = normalizeAddress([housenumber, street].filter(Boolean).join(" "));
+      const normalizedStreet = normalizeAddress(street);
+      const normalizedCity = normalizeAddress(city);
+      const normalizedLabel = normalizeAddress(label);
+      const normalizedPostcode = normalizeAddress(postcode);
+
+      return items.filter((item) => {
+        const siege = item.siege || {};
+        const addressLines = [
+          siege.adresse_ligne_1,
+          siege.adresse_ligne_2,
+          siege.adresse_ligne_3,
+          siege.adresse_ligne_4,
+          siege.adresse_ligne_5,
+          siege.adresse_ligne_6,
+          [siege.code_postal, siege.ville].filter(Boolean).join(" "),
+        ]
+          .map(normalizeAddress)
+          .filter(Boolean);
+
+        if (addressLines.length === 0) {
+          return false;
+        }
+
+        let matchesStreet = false;
+        const hasStreetData = Boolean(normalizedStreetWithNumber || normalizedStreet);
+        if (!hasStreetData) {
+          matchesStreet = true;
+        }
+        if (normalizedStreetWithNumber) {
+          matchesStreet = addressLines.some((line) => line.includes(normalizedStreetWithNumber));
+        }
+
+        if (!matchesStreet && relaxNumber && normalizedStreet) {
+          matchesStreet = addressLines.some((line) => line.includes(normalizedStreet));
+        }
+
+        if (!matchesStreet && allowLabelMatch && normalizedLabel) {
+          matchesStreet = addressLines.some((line) => line.includes(normalizedLabel));
+        }
+
+        if (!matchesStreet) {
+          return false;
+        }
+
+        if (requirePostcodeMatch && normalizedPostcode) {
+          const candidatePostcode = normalizeAddress(siege.code_postal || "");
+          if (!candidatePostcode || candidatePostcode !== normalizedPostcode) {
+            return false;
+          }
+        }
+
+        if (normalizedCity && !ignoreCityMismatch) {
+          const candidateCity = normalizeAddress(siege.ville || "");
+          if (!candidateCity) {
+            return false;
+          }
+          const cityMatches =
+            candidateCity === normalizedCity ||
+            candidateCity.includes(normalizedCity) ||
+            normalizedCity.includes(candidateCity);
+          if (!cityMatches) {
+            return false;
+          }
+        }
+
+        return true;
+      });
+    }
+
+    function renderResults(items) {
+      if (!Array.isArray(items) || items.length === 0) {
+        resultsEl.innerHTML = "<p>Aucune entreprise trouvée</p>";
+        return;
+      }
+
+      const dentalItems = [];
+      const otherItems = [];
+
+      items
+        .filter((item) => !currentSelection || item.siren !== currentSelection.siren)
+        .forEach((item) => {
+          const codeNAF = item.code_naf || "";
+          const libelleNAF = item.libelle_code_naf || "Activité inconnue";
+          const activite = codeNAF ? `${codeNAF} - ${libelleNAF}` : libelleNAF;
+          const siege = item.siege || {};
+          const adresseParts = [];
+          if (siege.adresse_ligne_1) {
+            adresseParts.push(siege.adresse_ligne_1);
+          }
+          const cpVille = `${(siege.code_postal || "").trim()} ${(siege.ville || "").trim()}`.trim();
+          if (cpVille) {
+            adresseParts.push(cpVille);
+          }
+          const adresse = adresseParts.join(", ");
+
+          const isDental = codeNAF.startsWith("86");
+          const style = isDental ? "color:green; font-weight:bold;" : "";
+
+          const html = `
+      <div class="item"
+           data-siren="${escapeAttr(item.siren || "")}" 
+           data-name="${escapeAttr(item.nom_entreprise || "")}"
+           data-activite="${escapeAttr(activite)}"
+           data-adresse="${escapeAttr(adresse)}">
+        <strong>${escapeHtml(item.nom_entreprise || "")}</strong><br>
+        <small style="${style}">${escapeHtml(activite)}</small><br>
+        <small>${escapeHtml(adresse)}</small><br>
+      </div>
+    `;
+
+          if (isDental) {
+            dentalItems.push(html);
+          } else {
+            otherItems.push(html);
+          }
+        });
+
+      let pinned = "";
+      if (currentSelection) {
+        pinned = `
+    <div class="item selected-item"
+         data-siren="${escapeAttr(currentSelection.siren || "")}" 
+         data-name="${escapeAttr(currentSelection.name)}"
+         data-activite="${escapeAttr(currentSelection.activite || "")}" 
+         data-adresse="${escapeAttr(currentSelection.adresse || "")}">
+      <strong>${escapeHtml(currentSelection.name)}</strong><br>
+      <small>${escapeHtml(currentSelection.activite || "")}</small><br>
+      <small>${escapeHtml(currentSelection.adresse || "")}</small><br>
+    </div>
+  `;
+      }
+
+      resultsEl.innerHTML = pinned + dentalItems.join("") + otherItems.join("");
+    }
+
+    function createAddressSearchAttempts(addressData = {}, reasonQuery = "") {
+      const base = {
+        label: addressData.label || "",
+        housenumber: addressData.housenumber || "",
+        street: addressData.street || "",
+        postcode: addressData.postcode || "",
+        city: addressData.city || "",
+      };
+
+      const attempts = [];
+      const seen = new Set();
+
+      const trimmedReason = typeof reasonQuery === "string" ? reasonQuery.trim() : "";
+
+      const streetLine = [base.housenumber, base.street].filter(Boolean).join(" ").trim();
+      const labelFallback = [streetLine, base.postcode, base.city].filter(Boolean).join(" ").trim() || base.label;
+
+      function defaultFilter(overrides = {}) {
+        const filter = {
+          ...base,
+          requirePostcodeMatch: Boolean(base.postcode),
+          ...overrides,
+        };
+
+        if (!base.postcode && overrides.requirePostcodeMatch === undefined) {
+          delete filter.requirePostcodeMatch;
+        }
+
+        return filter;
+      }
+
+      function pushAttempt(rawParams, filterOverrides) {
+        const paramsCopy = { ...rawParams };
+        Object.keys(paramsCopy).forEach((key) => {
+          if (typeof paramsCopy[key] === "string") {
+            const trimmed = paramsCopy[key].trim();
+            if (!trimmed) {
+              delete paramsCopy[key];
+            } else {
+              paramsCopy[key] = trimmed;
+            }
+          }
+        });
+
+        if (base.postcode && !paramsCopy.code_postal) {
+          paramsCopy.code_postal = base.postcode;
+        }
+        if (base.city && !paramsCopy.ville) {
+          paramsCopy.ville = base.city;
+        }
+
+        const prepared = buildPappersParams(paramsCopy);
+        if (!prepared) return;
+
+        const signature = JSON.stringify(prepared);
+        const filterConfig = filterOverrides ? defaultFilter(filterOverrides) : defaultFilter();
+        const signatureKey = `${signature}::${JSON.stringify(filterConfig)}`;
+        if (seen.has(signatureKey)) return;
+        seen.add(signatureKey);
+
+        attempts.push({
+          params: prepared,
+          addressFilter: filterConfig,
+          signature,
+        });
+      }
+
+      if (streetLine) {
+        pushAttempt(
+          {
+            adresse: streetLine,
+            q: composeQuery(trimmedReason, streetLine, base.city, base.postcode),
+          },
+          { relaxNumber: false }
+        );
+        pushAttempt(
+          {
+            adresse: streetLine,
+            q: composeQuery(trimmedReason, streetLine, base.city, base.postcode),
+          },
+          { relaxNumber: true }
+        );
+        pushAttempt(
+          {
+            adresse: streetLine,
+            q: composeQuery(trimmedReason, streetLine, base.city, base.postcode),
+          },
+          { relaxNumber: true, ignoreCityMismatch: true }
+        );
+      }
+
+      if (streetLine) {
+        pushAttempt(
+          {
+            adresse: streetLine,
+            q: composeQuery(trimmedReason, streetLine, base.city),
+          },
+          { relaxNumber: false }
+        );
+        pushAttempt(
+          {
+            adresse: streetLine,
+            q: composeQuery(trimmedReason, streetLine, base.city),
+          },
+          { relaxNumber: true }
+        );
+        pushAttempt(
+          {
+            adresse: streetLine,
+            q: composeQuery(trimmedReason, streetLine, base.city),
+          },
+          { relaxNumber: true, ignoreCityMismatch: true }
+        );
+      }
+
+      if (streetLine) {
+        pushAttempt(
+          {
+            q: composeQuery(trimmedReason, streetLine, base.postcode),
+          },
+          { relaxNumber: true, ignoreCityMismatch: true }
+        );
+      }
+
+      if (streetLine) {
+        pushAttempt(
+          {
+            q: composeQuery(trimmedReason, streetLine, base.city),
+          },
+          { relaxNumber: true }
+        );
+        pushAttempt(
+          {
+            q: composeQuery(trimmedReason, streetLine, base.city),
+          },
+          { relaxNumber: true, ignoreCityMismatch: true }
+        );
+      }
+
+      if (labelFallback || base.label) {
+        const finalLabel = base.label || labelFallback;
+        pushAttempt(
+          { q: composeQuery(trimmedReason, finalLabel) },
+          { relaxNumber: true, allowLabelMatch: true, ignoreCityMismatch: true }
+        );
+      }
+
+      if (trimmedReason) {
+        pushAttempt(
+          { q: composeQuery(trimmedReason, base.postcode) },
+          { relaxNumber: true }
+        );
+        pushAttempt(
+          { q: composeQuery(trimmedReason, base.city) },
+          { relaxNumber: true }
+        );
+      }
+
+      if (!attempts.length && (trimmedReason || base.label)) {
+        pushAttempt(
+          { q: composeQuery(trimmedReason, base.label) },
+          { relaxNumber: true, allowLabelMatch: true, ignoreCityMismatch: true }
+        );
+      }
+
+      return attempts;
+    }
 
     function escapeHtml(value = "") {
       const str = typeof value === "string" ? value : String(value);
@@ -552,15 +963,57 @@
       }
     }
     // --- Raccrocher la recherche avec debounce ---
+    function triggerSearch() {
+      clearTimeout(debounceTimer);
+
+      const reason = currentReasonValue.trim();
+
+      if (currentFetchController) {
+        currentFetchController.abort();
+        currentFetchController = null;
+      }
+
+      if (selectedAddressContext) {
+        const attempts = createAddressSearchAttempts(selectedAddressContext, reason);
+
+        if (!attempts.length) {
+          if (reason.length >= 2) {
+            searchPappers({ q: reason });
+          } else if (selectedAddressContext.label) {
+            searchPappers({ q: selectedAddressContext.label });
+          } else {
+            resultsEl.innerHTML = "";
+          }
+          return;
+        }
+
+        const [firstAttempt, ...fallbackAttempts] = attempts;
+        searchPappers(firstAttempt.params, {
+          addressFilter: firstAttempt.addressFilter,
+          fallbacks: fallbackAttempts,
+          signature: firstAttempt.signature,
+        });
+        return;
+      }
+
+      if (reason.length >= 2) {
+        searchPappers({ q: reason });
+      } else {
+        resultsEl.innerHTML = "";
+      }
+    }
+
     function attachSearch(inputId) {
       const input = document.getElementById(inputId);
       input.addEventListener("input", (e) => {
         const value = e.target.value;
+        currentReasonValue = value;
 
         clearTimeout(debounceTimer);
         if (currentFetchController) currentFetchController.abort();
 
         debounceTimer = setTimeout(() => {
+          triggerSearch();
           searchPappers({ q: value });
         }, 250);
       });
@@ -571,6 +1024,19 @@
     // --- Spécial adresse BAN ---
     const inputAdresse = document.getElementById("q_adresse");
     inputAdresse.addEventListener("input", (e) => {
+      if (selectedAddressContext) {
+        selectedAddressContext = null;
+        if (currentFetchController) {
+          currentFetchController.abort();
+          currentFetchController = null;
+        }
+        if (currentReasonValue.trim().length >= 2) {
+          triggerSearch();
+        } else {
+          resultsEl.innerHTML = "";
+        }
+      }
+
       autocompleteBAN(e.target.value);
     });
 
@@ -582,6 +1048,7 @@
       inputAdresse.value = selectedAddress;
       banSuggestionsEl.innerHTML = "";
 
+      selectedAddressContext = {
       const addressContext = {
         label: selectedAddress,
         housenumber: div.dataset.housenumber || "",
@@ -590,6 +1057,7 @@
         city: div.dataset.city || "",
       };
 
+      triggerSearch();
       const attempts = createAddressSearchAttempts(addressContext);
 
       if (!attempts.length) {
