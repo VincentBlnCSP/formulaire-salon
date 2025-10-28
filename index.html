@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Formulaire Salon</title>
+  <style>
+    .suggestions {
+      border: 1px solid #ccc;
+      max-height: 150px;
+      overflow-y: auto;
+      background: white;
+      position: absolute;
+      z-index: 1000;
+      width: 300px;
+    }
+    .suggestions div {
+      padding: 5px;
+      cursor: pointer;
+    }
+    .suggestions div:hover {
+      background: #f0f0f0;
+    }
+    .item {
+      border-bottom: 1px solid #eee;
+      padding: 6px;
+      cursor: pointer;
+    }
+    .item:hover {
+      background: #fafafa;
+    }
+
+    .selected-item {
+  background: #e6ffe6 !important; /* vert clair */
+  border-left: 4px solid green;
+}
+
+  </style>
+</head>
+<body>
+  <h1>Inscription Praticien</h1>
+
+  <form id="form">
+    <input id="prenom" placeholder="Prénom" required />
+    <input id="nom" placeholder="Nom" required />
+    <input id="email" type="email" placeholder="Email" required />
+    <input id="tel" placeholder="Téléphone" />
+    <input id="q_raison" placeholder="Raison sociale" />
+    <input id="q_adresse" placeholder="Adresse" />
+    <div id="ban_suggestions" class="suggestions"></div>
+    
+    <div id="results"></div>
+
+    <label for="affiliation">Type d'affiliation :</label>
+    <select id="affiliation" required>
+      <option value="">-- Choisir --</option>
+      <option value="2">Affiliation CSP Classique</option>
+      <option value="3">Affiliation CSPxSTG</option>
+      <option value="4">Affiliation gracieuse</option>
+    </select>
+
+    <button type="submit">Envoyer</button>
+  </form>
+
+  <script>
+    const PAPPERS_PROXY_URL = "/.netlify/functions/pappers";
+    const NETLIFY_PROXY_URL = "/.netlify/functions/sendToMake";
+
+    const resultsEl = document.getElementById("results");
+   
+    let currentSelection = null;
+    let debounceTimer;
+    let currentFetchController = null;
+
+    // --- Autocomplete BAN ---
+    async function autocompleteBAN(query) {
+      if (query.length < 3) {
+        document.getElementById("ban_suggestions").innerHTML = "";
+        return;
+      }
+      try {
+        const res = await fetch(`https://api-adresse.data.gouv.fr/search/?q=${encodeURIComponent(query)}&limit=5`);
+        const data = await res.json();
+
+        const suggestions = (data.features || []).map(f =>
+          `<div data-address="${f.properties.label}">${f.properties.label}</div>`
+        ).join("");
+
+        document.getElementById("ban_suggestions").innerHTML = suggestions;
+      } catch (err) {
+        console.error("Erreur autocomplete BAN:", err);
+      }
+    }
+
+    // --- Recherche Pappers (toujours via q=) ---
+    async function searchPappers(type, value) {
+      const query = (value || "").trim();
+      if (query.length < 2) {
+        resultsEl.innerHTML = "";
+        return;
+      }
+
+      if (currentFetchController) currentFetchController.abort();
+      currentFetchController = new AbortController();
+
+      resultsEl.innerHTML = "<p>Recherche…</p>";
+
+      try {
+        const url = `${PAPPERS_PROXY_URL}?q=${encodeURIComponent(query)}&taille=10`;
+        const res = await fetch(url, { signal: currentFetchController.signal });
+        const data = await res.json();
+
+        const items = data.resultats || [];
+        if (items.length === 0) {
+          resultsEl.innerHTML = "<p>Aucune entreprise trouvée</p>";
+          return;
+        }
+
+   // 1) Construire la liste des résultats normalement,
+//    en excluant le doublon si c'est l'entreprise sélectionnée
+// Sépare en deux listes
+const dentalItems = [];
+const otherItems = [];
+
+items
+  .filter(item => !currentSelection || item.siren !== currentSelection.siren)
+  .forEach(item => {
+    const codeNAF = item.code_naf || "";
+    const libelleNAF = item.libelle_code_naf || "Activité inconnue";
+    const activite = codeNAF ? `${codeNAF} - ${libelleNAF}` : libelleNAF;
+    const adresse = item.siege ? `${item.siege.adresse_ligne_1 || ""}, ${item.siege.code_postal || ""} ${item.siege.ville || ""}` : "";
+
+    const isDental = codeNAF.startsWith("86"); 
+    const style = isDental ? "color:green; font-weight:bold;" : "";
+
+    const html = `
+      <div class="item" 
+           data-siren="${item.siren}" 
+           data-name="${item.nom_entreprise}"
+           data-activite="${activite}"
+           data-adresse="${adresse}"
+        <strong>${item.nom_entreprise}</strong><br>
+        <small style="${style}">${activite}</small><br>
+        <small>${adresse}</small><br>
+      </div>
+    `;
+
+    if (isDental) {
+      dentalItems.push(html); // en haut
+    } else {
+      otherItems.push(html);
+    }
+  });
+
+// 1) Construire le bloc "pinned" si sélection
+let pinned = "";
+if (currentSelection) {
+  pinned = `
+    <div class="item selected-item"
+         data-siren="${currentSelection.siren}" 
+         data-name="${currentSelection.name}"
+         data-activite="${currentSelection.activite || ""}"
+         data-adresse="${currentSelection.adresse || ""}"
+      <strong>${currentSelection.name}</strong><br>
+      <small>${currentSelection.activite || ""}</small><br>
+      <small>${currentSelection.adresse || ""}</small><br>
+    </div>
+  `;
+}
+
+// 2) Injecter dans l’ordre : pinned (si existe) → dental → autres
+resultsEl.innerHTML = pinned + dentalItems.join("") + otherItems.join("");
+
+
+
+
+      } catch (err) {
+        if (err.name === "AbortError") return;
+        console.error("Erreur Pappers:", err);
+        resultsEl.innerHTML = "<p>⚠️ Erreur de recherche</p>";
+      }
+    }
+
+    // --- Raccrocher la recherche avec debounce ---
+    function attachSearch(inputId, type) {
+  const input = document.getElementById(inputId);
+  input.addEventListener("input", (e) => {
+    const value = e.target.value;
+
+    clearTimeout(debounceTimer);
+    if (currentFetchController) currentFetchController.abort();
+
+    debounceTimer = setTimeout(() => {
+      searchPappers(type, value);
+    }, 250);
+  });
+}
+
+
+    attachSearch("q_raison", "raison");
+
+    // --- Spécial adresse BAN ---
+    const inputAdresse = document.getElementById("q_adresse");
+    inputAdresse.addEventListener("input", (e) => {
+      autocompleteBAN(e.target.value);
+    });
+
+    document.getElementById("ban_suggestions").addEventListener("click", (e) => {
+      const div = e.target.closest("div");
+      if (!div) return;
+
+      const selectedAddress = div.dataset.address;
+      inputAdresse.value = selectedAddress;
+      document.getElementById("ban_suggestions").innerHTML = "";
+
+      // Recherche Pappers avec adresse complète
+      searchPappers("adresse", selectedAddress);
+
+      // Si trop de résultats → relancer avec Rue+Ville
+      setTimeout(() => {
+        const items = document.querySelectorAll("#results .item");
+        if (items.length > 30) {
+          const parts = selectedAddress.split(",");
+          const rueVille = parts.slice(0, 2).join(" ");
+          searchPappers("adresse", rueVille);
+        }
+      }, 1500);
+    });
+
+    // --- Sélection d'une entreprise ---
+    resultsEl.addEventListener("click", (e) => {
+  const div = e.target.closest(".item");
+  if (!div) return;
+
+  // Si on clique sur l’entreprise déjà sélectionnée → désélection
+  if (currentSelection && div.dataset.siren === currentSelection.siren) {
+    div.classList.remove("selected-item");
+    currentSelection = null;
+    return;
+  }
+
+  // Nouvelle sélection
+  currentSelection = { 
+  name: div.dataset.name, 
+  siren: div.dataset.siren,
+  activite: div.dataset.activite || "",
+  adresse: div.dataset.adresse || ""
+};
+
+  // Retire le vert partout et applique seulement au clic
+  resultsEl.querySelectorAll(".selected-item").forEach(el => el.classList.remove("selected-item"));
+  div.classList.add("selected-item");
+});
+
+
+    // --- Soumission du formulaire ---
+    document.getElementById("form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+
+      if (!currentSelection) {
+        alert("Choisis une entreprise");
+        return;
+      }
+      
+      const affiliationCode = document.getElementById("affiliation").value;
+      if (!affiliationCode) { 
+        alert("Choisis un type d'affiliation"); 
+        return; 
+      }
+
+      const payload = {
+        praticien: {
+          prenom: document.getElementById("prenom").value,
+          nom: document.getElementById("nom").value,
+          email: document.getElementById("email").value,
+          tel: document.getElementById("tel").value,
+        },
+        entreprise: currentSelection,
+        affiliation: Number(affiliationCode),
+        timestamp: new Date().toISOString(),
+      };
+
+      try {
+        const response = await fetch(NETLIFY_PROXY_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+
+        if (response.ok) {
+          alert("✅ Données envoyées à Make via Netlify !");
+        } else {
+          const errText = await response.text().catch(() => "");
+          console.error("Réponse proxy:", errText);
+          alert("❌ Erreur côté proxy/Make");
+        }
+      } catch (err) {
+        console.error("Erreur envoi webhook (proxy):", err);
+        alert("⚠️ Erreur réseau (proxy)");
+      }
+    });
+  </script>
+</body>
+</html>
