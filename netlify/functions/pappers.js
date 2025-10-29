@@ -33,6 +33,7 @@ export async function handler(event) {
       const value = typeof rawValue === "string" ? rawValue.trim() : rawValue;
       if (!value) continue;
       if (key === "q" && value.length < 1) continue;
+      if (key === "q" && value.length < 2) continue;
 
       params.set(key, value);
       if (searchKeys.has(key)) {
