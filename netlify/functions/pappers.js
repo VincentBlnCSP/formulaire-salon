@@ -32,6 +32,7 @@ export async function handler(event) {
       if (rawValue === undefined || rawValue === null) continue;
       const value = typeof rawValue === "string" ? rawValue.trim() : rawValue;
       if (!value) continue;
+      if (key === "q" && value.length < 1) continue;
       if (key === "q" && value.length < 2) continue;
 
       params.set(key, value);

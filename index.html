@@ -29,12 +29,10 @@
     .item:hover {
       background: #fafafa;
     }
-
     .selected-item {
-  background: #e6ffe6 !important; /* vert clair */
-  border-left: 4px solid green;
-}
-
+      background: #e6ffe6 !important;
+      border-left: 4px solid green;
+    }
   </style>
 </head>
 <body>
@@ -48,7 +46,7 @@
     <input id="q_raison" placeholder="Raison sociale" />
     <input id="q_adresse" placeholder="Adresse" />
     <div id="ban_suggestions" class="suggestions"></div>
-    
+
     <div id="results"></div>
 
     <label for="affiliation">Type d'affiliation :</label>
@@ -65,6 +63,23 @@
   <script>
     const PAPPERS_PROXY_URL = "/.netlify/functions/pappers";
     const NETLIFY_PROXY_URL = "/.netlify/functions/sendToMake";
+    const PAPPERS_RESULT_SIZE = 50;
+    const BAN_SUGGESTION_LIMIT = 5;
+
+    const resultsEl = document.getElementById("results");
+    const banSuggestionsEl = document.getElementById("ban_suggestions");
+    const reasonInput = document.getElementById("q_raison");
+    const addressInput = document.getElementById("q_adresse");
+
+    let debounceTimer;
+    let currentFetchController = null;
+    let currentSelection = null;
+    let postcodeFilter = "";
+    let cityFilter = "";
+    let lastBanSelectionValue = "";
+
+    function escapeHtml(value = "") {
+      const str = typeof value === "string" ? value : String(value ?? "");
     const DEFAULT_RESULT_SIZE = "10";
 
     const resultsEl = document.getElementById("results");
@@ -85,6 +100,15 @@
         .replace(/"/g, "&quot;")
         .replace(/'/g, "&#39;");
     }
+
+    function escapeAttr(value = "") {
+      return escapeHtml(value).replace(/`/g, "&#96;");
+    }
+
+    function buildCompanyAddress(siege = {}) {
+      const parts = [];
+      if (siege.adresse_ligne_1) {
+        parts.push(siege.adresse_ligne_1);
 
     function escapeAttr(value = "") {
       return escapeHtml(value).replace(/`/g, "&#96;");
@@ -863,10 +887,33 @@
         banSuggestionsEl.innerHTML = "";
         return;
       }
-      try {
-        const res = await fetch(`https://api-adresse.data.gouv.fr/search/?q=${encodeURIComponent(query)}&limit=5`);
-        const data = await res.json();
+      const cpVille = `${(siege.code_postal || "").trim()} ${(siege.ville || "").trim()}`.trim();
+      if (cpVille) {
+        parts.push(cpVille);
+      }
+      return parts.join(", ");
+    }
 
+    function buildResultHtml(item) {
+      const codeNAF = item.code_naf || "";
+      const libelleNAF = item.libelle_code_naf || "Activité inconnue";
+      const activite = codeNAF ? `${codeNAF} - ${libelleNAF}` : libelleNAF;
+      const adresse = buildCompanyAddress(item.siege || {});
+      const isMedical = codeNAF.startsWith("86");
+      const isSelected = currentSelection && currentSelection.siren === (item.siren || "");
+
+      if (isSelected) {
+        currentSelection = {
+          siren: item.siren || "",
+          name: item.nom_entreprise || "",
+          activite,
+          adresse,
+        };
+      }
+
+      const classes = ["item"];
+      if (isSelected) {
+        classes.push("selected-item");
         const suggestions = (data.features || []).map((feature) => {
           const props = feature.properties || {};
           const attrPairs = [
@@ -886,8 +933,61 @@
       } catch (err) {
         console.error("Erreur autocomplete BAN:", err);
       }
+
+      const style = isMedical ? "color:green; font-weight:bold;" : "";
+
+      return `
+        <div class="${classes.join(" ")}"
+             data-siren="${escapeAttr(item.siren || "")}"
+             data-name="${escapeAttr(item.nom_entreprise || "")}"
+             data-activite="${escapeAttr(activite)}"
+             data-adresse="${escapeAttr(adresse)}">
+          <strong>${escapeHtml(item.nom_entreprise || "")}</strong><br>
+          <small style="${style}">${escapeHtml(activite)}</small><br>
+          <small>${escapeHtml(adresse)}</small><br>
+        </div>
+      `;
     }
 
+    function renderResults(items) {
+      if (!Array.isArray(items) || items.length === 0) {
+        resultsEl.innerHTML = "<p>Aucune entreprise trouvée</p>";
+        return;
+      }
+
+      const sorted = items.slice().sort((a, b) => {
+        const aMedical = String(a.code_naf || "").startsWith("86");
+        const bMedical = String(b.code_naf || "").startsWith("86");
+        if (aMedical === bMedical) {
+          return 0;
+        }
+        return aMedical ? -1 : 1;
+      });
+
+      resultsEl.innerHTML = sorted.map((item) => buildResultHtml(item)).join("");
+    }
+
+    async function searchPappers() {
+      const reason = reasonInput.value.trim();
+
+      if (!reason) {
+        resultsEl.innerHTML = "";
+        return;
+      }
+
+      const params = new URLSearchParams();
+      params.set("q", reason);
+      params.set("taille", String(PAPPERS_RESULT_SIZE));
+      if (postcodeFilter) {
+        params.set("code_postal", postcodeFilter);
+      }
+      if (cityFilter) {
+        params.set("ville", cityFilter);
+      }
+
+      if (currentFetchController) {
+        currentFetchController.abort();
+      }
     // --- Recherche Pappers ---
     async function searchPappers(rawParams = {}, options = {}) {
       const fallbackQueue = Array.isArray(options.fallbacks) ? [...options.fallbacks] : [];
@@ -915,6 +1015,21 @@
       resultsEl.innerHTML = "<p>Recherche…</p>";
 
       try {
+        const url = `${PAPPERS_PROXY_URL}?${params.toString()}`;
+        const res = await fetch(url, { signal: currentFetchController.signal });
+        const data = await res.json();
+
+        let items = Array.isArray(data.resultats) ? data.resultats : [];
+
+        if (postcodeFilter) {
+          const target = postcodeFilter.trim();
+          items = items.filter((item) => {
+            const cp = ((item.siege || {}).code_postal || "").trim();
+            return cp.startsWith(target);
+          });
+        }
+
+        if (!items.length) {
         const queryString = buildQueryString(params);
         const url = `${PAPPERS_PROXY_URL}?${queryString}`;
         const res = await fetch(url, { signal: currentFetchController.signal });
@@ -953,6 +1068,7 @@
           return;
         }
 
+        renderResults(items);
         renderResults(filteredItems);
       } catch (err) {
         if (err.name === "AbortError") return;
@@ -962,6 +1078,70 @@
         currentFetchController = null;
       }
     }
+
+    function scheduleSearch() {
+      clearTimeout(debounceTimer);
+      if (currentFetchController) {
+        currentFetchController.abort();
+        currentFetchController = null;
+      }
+      debounceTimer = setTimeout(() => {
+        searchPappers();
+      }, 250);
+    }
+
+    async function autocompleteBAN(query) {
+      const trimmed = query.trim();
+      if (trimmed.length < 3) {
+        banSuggestionsEl.innerHTML = "";
+        return;
+      }
+
+      try {
+        const url = `https://api-adresse.data.gouv.fr/search/?q=${encodeURIComponent(trimmed)}&limit=${BAN_SUGGESTION_LIMIT}`;
+        const res = await fetch(url);
+        const data = await res.json();
+        const features = Array.isArray(data.features) ? data.features : [];
+
+        const suggestions = features
+          .map((feature) => {
+            const props = feature.properties || {};
+            const label = props.label || "";
+            const postcode = props.postcode || "";
+            const city = props.city || "";
+            return `
+              <div data-label="${escapeAttr(label)}"
+                   data-postcode="${escapeAttr(postcode)}"
+                   data-city="${escapeAttr(city)}">
+                ${escapeHtml(label)}
+              </div>
+            `;
+          })
+          .join("");
+
+        banSuggestionsEl.innerHTML = suggestions;
+      } catch (err) {
+        console.error("Erreur autocomplete BAN:", err);
+      }
+    }
+
+    reasonInput.addEventListener("input", () => {
+      scheduleSearch();
+    });
+
+    addressInput.addEventListener("input", (e) => {
+      const value = e.target.value;
+
+      if (value !== lastBanSelectionValue) {
+        lastBanSelectionValue = "";
+        cityFilter = "";
+      }
+
+      const manualMatch = value.match(/\b\d{5}\b/);
+      if (manualMatch) {
+        postcodeFilter = manualMatch[0];
+      } else if (!lastBanSelectionValue) {
+        postcodeFilter = "";
     // --- Raccrocher la recherche avec debounce ---
     function triggerSearch() {
       clearTimeout(debounceTimer);
@@ -1001,8 +1181,48 @@
       } else {
         resultsEl.innerHTML = "";
       }
-    }
 
+      autocompleteBAN(value);
+      scheduleSearch();
+    });
+
+    banSuggestionsEl.addEventListener("click", (e) => {
+      const div = e.target.closest("div[data-label]");
+      if (!div) return;
+
+      const label = div.dataset.label || "";
+      const postcode = div.dataset.postcode || "";
+      const city = div.dataset.city || "";
+
+      lastBanSelectionValue = label;
+      postcodeFilter = postcode;
+      cityFilter = city;
+
+      addressInput.value = label;
+      banSuggestionsEl.innerHTML = "";
+
+      scheduleSearch();
+    });
+
+    resultsEl.addEventListener("click", (e) => {
+      const div = e.target.closest(".item");
+      if (!div) return;
+
+      if (currentSelection && div.dataset.siren === currentSelection.siren) {
+        div.classList.remove("selected-item");
+        currentSelection = null;
+        return;
+      }
+
+      currentSelection = {
+        name: div.dataset.name || "",
+        siren: div.dataset.siren || "",
+        activite: div.dataset.activite || "",
+        adresse: div.dataset.adresse || "",
+      };
+
+      resultsEl.querySelectorAll(".item").forEach((el) => el.classList.remove("selected-item"));
+      div.classList.add("selected-item");
     function attachSearch(inputId) {
       const input = document.getElementById(inputId);
       input.addEventListener("input", (e) => {
@@ -1075,33 +1295,6 @@
       });
     });
 
-    // --- Sélection d'une entreprise ---
-    resultsEl.addEventListener("click", (e) => {
-  const div = e.target.closest(".item");
-  if (!div) return;
-
-  // Si on clique sur l’entreprise déjà sélectionnée → désélection
-  if (currentSelection && div.dataset.siren === currentSelection.siren) {
-    div.classList.remove("selected-item");
-    currentSelection = null;
-    return;
-  }
-
-  // Nouvelle sélection
-  currentSelection = { 
-  name: div.dataset.name, 
-  siren: div.dataset.siren,
-  activite: div.dataset.activite || "",
-  adresse: div.dataset.adresse || ""
-};
-
-  // Retire le vert partout et applique seulement au clic
-  resultsEl.querySelectorAll(".selected-item").forEach(el => el.classList.remove("selected-item"));
-  div.classList.add("selected-item");
-});
-
-
-    // --- Soumission du formulaire ---
     document.getElementById("form").addEventListener("submit", async (e) => {
       e.preventDefault();
 
@@ -1109,11 +1302,11 @@
         alert("Choisis une entreprise");
         return;
       }
-      
+
       const affiliationCode = document.getElementById("affiliation").value;
-      if (!affiliationCode) { 
-        alert("Choisis un type d'affiliation"); 
-        return; 
+      if (!affiliationCode) {
+        alert("Choisis un type d'affiliation");
+        return;
       }
 
       const payload = {
