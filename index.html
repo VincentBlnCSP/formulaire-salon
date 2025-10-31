@@ -14,30 +14,27 @@
       z-index: 1000;
       width: 300px;
     }
-
     .suggestions div {
       padding: 5px;
       cursor: pointer;
     }
-
     .suggestions div:hover {
       background: #f0f0f0;
     }
-
     .item {
       border-bottom: 1px solid #eee;
       padding: 6px;
       cursor: pointer;
     }
-
     .item:hover {
       background: #fafafa;
     }
 
     .selected-item {
-      background: #e6ffe6 !important;
-      border-left: 4px solid green;
-    }
+  background: #e6ffe6 !important; /* vert clair */
+  border-left: 4px solid green;
+}
+
   </style>
 </head>
 <body>
@@ -51,7 +48,7 @@
     <input id="q_raison" placeholder="Raison sociale" />
     <input id="q_adresse" placeholder="Adresse" />
     <div id="ban_suggestions" class="suggestions"></div>
-
+    
     <div id="results"></div>
 
     <label for="affiliation">Type d'affiliation :</label>
@@ -69,18 +66,13 @@
     const PAPPERS_PROXY_URL = "/.netlify/functions/pappers";
     const NETLIFY_PROXY_URL = "/.netlify/functions/sendToMake";
     const DEFAULT_RESULT_SIZE = "10";
-    const BAN_SUGGESTION_LIMIT = 5;
 
     const resultsEl = document.getElementById("results");
     const banSuggestionsEl = document.getElementById("ban_suggestions");
-    const reasonInput = document.getElementById("q_raison");
-    const addressInput = document.getElementById("q_adresse");
 
     let currentSelection = null;
     let debounceTimer;
     let currentFetchController = null;
-    let selectedAddressContext = null;
-    let currentReasonValue = "";
 
     function escapeHtml(value = "") {
       const str = typeof value === "string" ? value : String(value);
@@ -94,15 +86,6 @@
 
     function escapeAttr(value = "") {
       return escapeHtml(value).replace(/`/g, "&#96;");
-    }
-
-    function composeQuery(...parts) {
-      return parts
-        .filter((part) => typeof part === "string" && part.trim().length > 0)
-        .map((part) => part.trim())
-        .join(" ")
-        .replace(/\s+/g, " ")
-        .trim();
     }
 
     function buildPappersParams(rawParams = {}) {
@@ -141,9 +124,7 @@
         params.taille = DEFAULT_RESULT_SIZE;
       }
 
-      const hasSearchCriteria =
-        params.q || params.adresse || params.code_postal || params.ville;
-
+      const hasSearchCriteria = params.q || params.adresse || params.code_postal || params.ville;
       if (!hasSearchCriteria) {
         return null;
       }
@@ -161,379 +142,30 @@
       return searchParams.toString();
     }
 
-    function normalizeAddress(value) {
-      if (!value) return "";
-      return String(value)
-        .normalize("NFD")
-        .replace(/[\u0300-\u036f]/g, "")
-        .replace(/[^0-9A-Z]/gi, " ")
-        .replace(/\s+/g, " ")
-        .trim()
-        .toUpperCase();
-    }
-
-    function filterResultsByAddress(items, filterConfig = {}) {
-      if (!Array.isArray(items) || items.length === 0) {
-        return [];
-      }
-
-      const {
-        label = "",
-        street = "",
-        housenumber = "",
-        city = "",
-        postcode = "",
-        relaxNumber = false,
-        ignoreCityMismatch = false,
-        allowLabelMatch = false,
-        requirePostcodeMatch = false,
-      } = filterConfig;
-
-      const normalizedStreetWithNumber = normalizeAddress(
-        [housenumber, street].filter(Boolean).join(" ")
-      );
-      const normalizedStreet = normalizeAddress(street);
-      const normalizedCity = normalizeAddress(city);
-      const normalizedLabel = normalizeAddress(label);
-      const normalizedPostcode = normalizeAddress(postcode);
-
-      return items.filter((item) => {
-        const siege = item.siege || {};
-        const addressLines = [
-          siege.adresse_ligne_1,
-          siege.adresse_ligne_2,
-          siege.adresse_ligne_3,
-          siege.adresse_ligne_4,
-          siege.adresse_ligne_5,
-          siege.adresse_ligne_6,
-          [siege.code_postal, siege.ville].filter(Boolean).join(" "),
-        ]
-          .map(normalizeAddress)
-          .filter(Boolean);
-
-        if (addressLines.length === 0) {
-          return false;
-        }
-
-        let matchesStreet = false;
-        const hasStreetData = Boolean(normalizedStreetWithNumber || normalizedStreet);
-        if (!hasStreetData) {
-          matchesStreet = true;
-        }
-        if (normalizedStreetWithNumber) {
-          matchesStreet = addressLines.some((line) =>
-            line.includes(normalizedStreetWithNumber)
-          );
-        }
-
-        if (!matchesStreet && relaxNumber && normalizedStreet) {
-          matchesStreet = addressLines.some((line) =>
-            line.includes(normalizedStreet)
-          );
-        }
-
-        if (!matchesStreet && allowLabelMatch && normalizedLabel) {
-          matchesStreet = addressLines.some((line) =>
-            line.includes(normalizedLabel)
-          );
-        }
-
-        if (!matchesStreet) {
-          return false;
-        }
-
-        if (requirePostcodeMatch && normalizedPostcode) {
-          const candidatePostcode = normalizeAddress(siege.code_postal || "");
-          if (!candidatePostcode || candidatePostcode !== normalizedPostcode) {
-            return false;
-          }
-        }
-
-        if (normalizedCity && !ignoreCityMismatch) {
-          const candidateCity = normalizeAddress(siege.ville || "");
-          if (!candidateCity) {
-            return false;
-          }
-          const cityMatches =
-            candidateCity === normalizedCity ||
-            candidateCity.includes(normalizedCity) ||
-            normalizedCity.includes(candidateCity);
-          if (!cityMatches) {
-            return false;
-          }
-        }
-
-        return true;
-      });
-    }
-
-    function renderResults(items) {
-      if (!Array.isArray(items) || items.length === 0) {
-        resultsEl.innerHTML = "<p>Aucune entreprise trouvée</p>";
-        return;
-      }
-
-      const dentalItems = [];
-      const otherItems = [];
-
-      items
-        .filter((item) => !currentSelection || item.siren !== currentSelection.siren)
-        .forEach((item) => {
-          const codeNAF = item.code_naf || "";
-          const libelleNAF = item.libelle_code_naf || "Activité inconnue";
-          const activite = codeNAF ? `${codeNAF} - ${libelleNAF}` : libelleNAF;
-          const siege = item.siege || {};
-          const adresseParts = [];
-          if (siege.adresse_ligne_1) {
-            adresseParts.push(siege.adresse_ligne_1);
-          }
-          const cpVille = `${(siege.code_postal || "").trim()} ${(siege.ville || "").trim()}`.trim();
-          if (cpVille) {
-            adresseParts.push(cpVille);
-          }
-          const adresse = adresseParts.join(", ");
-
-          const isDental = codeNAF.startsWith("86");
-          const style = isDental ? "color:green; font-weight:bold;" : "";
-
-          const html = `
-      <div class="item"
-           data-siren="${escapeAttr(item.siren || "")}" 
-           data-name="${escapeAttr(item.nom_entreprise || "")}" 
-           data-activite="${escapeAttr(activite)}" 
-           data-adresse="${escapeAttr(adresse)}">
-        <strong>${escapeHtml(item.nom_entreprise || "")}</strong><br>
-        <small style="${style}">${escapeHtml(activite)}</small><br>
-        <small>${escapeHtml(adresse)}</small><br>
-      </div>
-    `;
-
-          if (isDental) {
-            dentalItems.push(html);
-          } else {
-            otherItems.push(html);
-          }
-        });
-
-      let pinned = "";
-      if (currentSelection) {
-        pinned = `
-    <div class="item selected-item"
-         data-siren="${escapeAttr(currentSelection.siren || "")}" 
-         data-name="${escapeAttr(currentSelection.name || "")}" 
-         data-activite="${escapeAttr(currentSelection.activite || "")}" 
-         data-adresse="${escapeAttr(currentSelection.adresse || "")}">
-      <strong>${escapeHtml(currentSelection.name || "")}</strong><br>
-      <small>${escapeHtml(currentSelection.activite || "")}</small><br>
-      <small>${escapeHtml(currentSelection.adresse || "")}</small><br>
-    </div>
-  `;
-      }
-
-      resultsEl.innerHTML = pinned + dentalItems.join("") + otherItems.join("");
-    }
-
-    function createAddressSearchAttempts(addressData = {}, reasonQuery = "") {
-      const base = {
-        label: addressData.label || "",
-        housenumber: addressData.housenumber || "",
-        street: addressData.street || "",
-        postcode: addressData.postcode || "",
-        city: addressData.city || "",
-      };
-
-      const attempts = [];
-      const seen = new Set();
-
-      const trimmedReason = typeof reasonQuery === "string" ? reasonQuery.trim() : "";
-      const streetLine = [base.housenumber, base.street].filter(Boolean).join(" ").trim();
-      const labelFallback = [streetLine, base.postcode, base.city]
-        .filter(Boolean)
-        .join(" ")
-        .trim() || base.label;
-
-      function defaultFilter(overrides = {}) {
-        const filter = {
-          ...base,
-          requirePostcodeMatch: Boolean(base.postcode),
-          ...overrides,
-        };
-
-        if (!base.postcode && overrides.requirePostcodeMatch === undefined) {
-          delete filter.requirePostcodeMatch;
-        }
-
-        return filter;
-      }
-
-      function pushAttempt(rawParams, filterOverrides) {
-        const paramsCopy = { ...rawParams };
-        Object.keys(paramsCopy).forEach((key) => {
-          if (typeof paramsCopy[key] === "string") {
-            const trimmed = paramsCopy[key].trim();
-            if (!trimmed) {
-              delete paramsCopy[key];
-            } else {
-              paramsCopy[key] = trimmed;
-            }
-          }
-        });
-
-        if (base.postcode && !paramsCopy.code_postal) {
-          paramsCopy.code_postal = base.postcode;
-        }
-        if (base.city && !paramsCopy.ville) {
-          paramsCopy.ville = base.city;
-        }
-
-        const prepared = buildPappersParams(paramsCopy);
-        if (!prepared) return;
-
-        const signature = JSON.stringify(prepared);
-        const filterConfig = filterOverrides ? defaultFilter(filterOverrides) : defaultFilter();
-        const signatureKey = `${signature}::${JSON.stringify(filterConfig)}`;
-        if (seen.has(signatureKey)) return;
-        seen.add(signatureKey);
-
-        attempts.push({
-          params: prepared,
-          addressFilter: filterConfig,
-          signature,
-        });
-      }
-
-      if (streetLine) {
-        pushAttempt(
-          {
-            adresse: streetLine,
-            q: composeQuery(trimmedReason, streetLine, base.city, base.postcode),
-          },
-          { relaxNumber: false }
-        );
-        pushAttempt(
-          {
-            adresse: streetLine,
-            q: composeQuery(trimmedReason, streetLine, base.city, base.postcode),
-          },
-          { relaxNumber: true }
-        );
-        pushAttempt(
-          {
-            adresse: streetLine,
-            q: composeQuery(trimmedReason, streetLine, base.city, base.postcode),
-          },
-          { relaxNumber: true, ignoreCityMismatch: true }
-        );
-      }
-
-      if (streetLine) {
-        pushAttempt(
-          {
-            adresse: streetLine,
-            q: composeQuery(trimmedReason, streetLine, base.city),
-          },
-          { relaxNumber: false }
-        );
-        pushAttempt(
-          {
-            adresse: streetLine,
-            q: composeQuery(trimmedReason, streetLine, base.city),
-          },
-          { relaxNumber: true }
-        );
-        pushAttempt(
-          {
-            adresse: streetLine,
-            q: composeQuery(trimmedReason, streetLine, base.city),
-          },
-          { relaxNumber: true, ignoreCityMismatch: true }
-        );
-      }
-
-      if (streetLine) {
-        pushAttempt(
-          {
-            q: composeQuery(trimmedReason, streetLine, base.postcode),
-          },
-          { relaxNumber: true, ignoreCityMismatch: true }
-        );
-      }
-
-      if (streetLine) {
-        pushAttempt(
-          {
-            q: composeQuery(trimmedReason, streetLine, base.city),
-          },
-          { relaxNumber: true }
-        );
-        pushAttempt(
-          {
-            q: composeQuery(trimmedReason, streetLine, base.city),
-          },
-          { relaxNumber: true, ignoreCityMismatch: true }
-        );
-      }
-
-      if (labelFallback || base.label) {
-        const finalLabel = base.label || labelFallback;
-        pushAttempt(
-          { q: composeQuery(trimmedReason, finalLabel) },
-          { relaxNumber: true, allowLabelMatch: true, ignoreCityMismatch: true }
-        );
-      }
-
-      if (trimmedReason) {
-        pushAttempt(
-          { q: composeQuery(trimmedReason, base.postcode) },
-          { relaxNumber: true }
-        );
-        pushAttempt(
-          { q: composeQuery(trimmedReason, base.city) },
-          { relaxNumber: true }
-        );
-      }
-
-      if (!attempts.length && (trimmedReason || base.label)) {
-        pushAttempt(
-          { q: composeQuery(trimmedReason, base.label) },
-          { relaxNumber: true, allowLabelMatch: true, ignoreCityMismatch: true }
-        );
-      }
-
-      return attempts;
-    }
-
+    // --- Autocomplete BAN ---
     async function autocompleteBAN(query) {
-      const trimmed = query.trim();
-      if (trimmed.length < 3) {
+      if (query.length < 3) {
         banSuggestionsEl.innerHTML = "";
         return;
       }
-
       try {
-        const url = new URL("https://api-adresse.data.gouv.fr/search/");
-        url.searchParams.set("q", trimmed);
-        url.searchParams.set("limit", String(BAN_SUGGESTION_LIMIT));
-
-        const res = await fetch(url.toString());
+        const res = await fetch(`https://api-adresse.data.gouv.fr/search/?q=${encodeURIComponent(query)}&limit=5`);
         const data = await res.json();
 
-        const suggestions = (data.features || [])
-          .map((feature) => {
-            const props = feature.properties || {};
-            const attrPairs = [
-              ["data-address", props.label || ""],
-              ["data-housenumber", props.housenumber || ""],
-              ["data-street", props.street || ""],
-              ["data-postcode", props.postcode || ""],
-              ["data-city", props.city || ""],
-            ]
-              .map(([key, value]) => `${key}="${escapeAttr(value)}"`)
-              .join(" ");
+        const suggestions = (data.features || []).map((feature) => {
+          const props = feature.properties || {};
+          const attrPairs = [
+            ["data-address", props.label || ""],
+            ["data-housenumber", props.housenumber || ""],
+            ["data-street", props.street || ""],
+            ["data-postcode", props.postcode || ""],
+            ["data-city", props.city || ""],
+          ]
+            .map(([key, value]) => `${key}="${escapeAttr(value)}"`)
+            .join(" ");
 
-            return `<div ${attrPairs}>${escapeHtml(props.label || "")}</div>`;
-          })
-          .join("");
+          return `<div ${attrPairs}>${escapeHtml(props.label || "")}</div>`;
+        }).join("");
 
         banSuggestionsEl.innerHTML = suggestions;
       } catch (err) {
@@ -541,27 +173,13 @@
       }
     }
 
-    async function searchPappers(rawParams = {}, options = {}) {
-      const fallbackQueue = Array.isArray(options.fallbacks)
-        ? [...options.fallbacks]
-        : [];
+    // --- Recherche Pappers ---
+    async function searchPappers(rawParams = {}, { fallbackParams } = {}) {
       const params = buildPappersParams(rawParams);
-
       if (!params) {
-        if (fallbackQueue.length > 0) {
-          const nextAttempt = fallbackQueue.shift();
-          searchPappers(nextAttempt.params, {
-            addressFilter: nextAttempt.addressFilter,
-            fallbacks: fallbackQueue,
-            signature: nextAttempt.signature,
-          });
-        } else {
-          resultsEl.innerHTML = "";
-        }
+        resultsEl.innerHTML = "";
         return;
       }
-
-      const signature = options.signature || JSON.stringify(params);
 
       if (currentFetchController) currentFetchController.abort();
       currentFetchController = new AbortController();
@@ -574,108 +192,111 @@
         const res = await fetch(url, { signal: currentFetchController.signal });
         const data = await res.json();
 
-        const items = Array.isArray(data.resultats) ? data.resultats : [];
-
-        let filteredItems = options.addressFilter
-          ? filterResultsByAddress(items, options.addressFilter)
-          : items;
-
-        if (filteredItems.length === 0) {
-          while (fallbackQueue.length > 0) {
-            const nextAttempt = fallbackQueue.shift();
-
-            if (nextAttempt.signature && nextAttempt.signature === signature) {
-              const reuseFiltered = nextAttempt.addressFilter
-                ? filterResultsByAddress(items, nextAttempt.addressFilter)
-                : items;
-              if (reuseFiltered.length > 0) {
-                renderResults(reuseFiltered);
-                return;
-              }
-              continue;
-            }
-
-            searchPappers(nextAttempt.params, {
-              addressFilter: nextAttempt.addressFilter,
-              fallbacks: fallbackQueue,
-              signature: nextAttempt.signature,
-            });
+        const items = data.resultats || [];
+        if (items.length === 0) {
+          if (fallbackParams) {
+            searchPappers(fallbackParams);
             return;
           }
-
           resultsEl.innerHTML = "<p>Aucune entreprise trouvée</p>";
           return;
         }
 
-        renderResults(filteredItems);
+   // 1) Construire la liste des résultats normalement,
+//    en excluant le doublon si c'est l'entreprise sélectionnée
+// Sépare en deux listes
+const dentalItems = [];
+const otherItems = [];
+
+items
+  .filter(item => !currentSelection || item.siren !== currentSelection.siren)
+  .forEach(item => {
+    const codeNAF = item.code_naf || "";
+    const libelleNAF = item.libelle_code_naf || "Activité inconnue";
+    const activite = codeNAF ? `${codeNAF} - ${libelleNAF}` : libelleNAF;
+    const siege = item.siege || {};
+    const adresseParts = [];
+    if (siege.adresse_ligne_1) {
+      adresseParts.push(siege.adresse_ligne_1);
+    }
+    const cpVille = `${(siege.code_postal || "").trim()} ${(siege.ville || "").trim()}`.trim();
+    if (cpVille) {
+      adresseParts.push(cpVille);
+    }
+    const adresse = adresseParts.join(", ");
+
+    const isDental = codeNAF.startsWith("86"); 
+    const style = isDental ? "color:green; font-weight:bold;" : "";
+
+    const html = `
+      <div class="item"
+           data-siren="${item.siren}"
+           data-name="${escapeAttr(item.nom_entreprise || "")}" 
+           data-activite="${escapeAttr(activite)}" 
+           data-adresse="${escapeAttr(adresse)}">
+        <strong>${escapeHtml(item.nom_entreprise || "")}</strong><br>
+        <small style="${style}">${escapeHtml(activite)}</small><br>
+        <small>${escapeHtml(adresse)}</small><br>
+      </div>
+    `;
+
+    if (isDental) {
+      dentalItems.push(html); // en haut
+    } else {
+      otherItems.push(html);
+    }
+  });
+
+// 1) Construire le bloc "pinned" si sélection
+let pinned = "";
+if (currentSelection) {
+  pinned = `
+    <div class="item selected-item"
+         data-siren="${currentSelection.siren}"
+         data-name="${escapeAttr(currentSelection.name)}"
+         data-activite="${escapeAttr(currentSelection.activite || "")}" 
+         data-adresse="${escapeAttr(currentSelection.adresse || "")}">
+      <strong>${escapeHtml(currentSelection.name)}</strong><br>
+      <small>${escapeHtml(currentSelection.activite || "")}</small><br>
+      <small>${escapeHtml(currentSelection.adresse || "")}</small><br>
+    </div>
+  `;
+}
+
+// 2) Injecter dans l’ordre : pinned (si existe) → dental → autres
+resultsEl.innerHTML = pinned + dentalItems.join("") + otherItems.join("");
+
+
+
+
       } catch (err) {
         if (err.name === "AbortError") return;
         console.error("Erreur Pappers:", err);
         resultsEl.innerHTML = "<p>⚠️ Erreur de recherche</p>";
-      } finally {
-        currentFetchController = null;
       }
     }
 
-    function triggerSearch() {
-      clearTimeout(debounceTimer);
+    // --- Raccrocher la recherche avec debounce ---
+    function attachSearch(inputId) {
+      const input = document.getElementById(inputId);
+      input.addEventListener("input", (e) => {
+        const value = e.target.value;
 
-      const reason = currentReasonValue.trim();
+        clearTimeout(debounceTimer);
+        if (currentFetchController) currentFetchController.abort();
 
-      if (currentFetchController) {
-        currentFetchController.abort();
-        currentFetchController = null;
-      }
-
-      if (selectedAddressContext) {
-        const attempts = createAddressSearchAttempts(selectedAddressContext, reason);
-
-        if (!attempts.length) {
-          if (reason.length >= 2) {
-            searchPappers({ q: reason });
-          } else if (selectedAddressContext.label) {
-            searchPappers({ q: selectedAddressContext.label });
-          } else {
-            resultsEl.innerHTML = "";
-          }
-          return;
-        }
-
-        const [firstAttempt, ...fallbackAttempts] = attempts;
-        searchPappers(firstAttempt.params, {
-          addressFilter: firstAttempt.addressFilter,
-          fallbacks: fallbackAttempts,
-          signature: firstAttempt.signature,
-        });
-        return;
-      }
-
-      if (reason.length >= 2) {
-        searchPappers({ q: reason });
-      } else {
-        resultsEl.innerHTML = "";
-      }
+        debounceTimer = setTimeout(() => {
+          searchPappers({ q: value });
+        }, 250);
+      });
     }
 
-    function scheduleSearch() {
-      clearTimeout(debounceTimer);
-      debounceTimer = setTimeout(() => {
-        triggerSearch();
-      }, 250);
-    }
+    attachSearch("q_raison");
 
-    reasonInput.addEventListener("input", (e) => {
-      currentReasonValue = e.target.value || "";
-      scheduleSearch();
-    });
-
-    addressInput.addEventListener("input", (e) => {
-      const value = e.target.value || "";
-      if (!selectedAddressContext || value !== selectedAddressContext.label) {
-        selectedAddressContext = null;
-      }
-      autocompleteBAN(value);
-      scheduleSearch();
+    // --- Spécial adresse BAN ---
+    const inputAdresse = document.getElementById("q_adresse");
+    inputAdresse.addEventListener("input", (e) => {
+      autocompleteBAN(e.target.value);
     });
 
     banSuggestionsEl.addEventListener("click", (e) => {
@@ -683,44 +304,50 @@
       if (!div) return;
 
       const selectedAddress = div.dataset.address || "";
-      addressInput.value = selectedAddress;
+      inputAdresse.value = selectedAddress;
       banSuggestionsEl.innerHTML = "";
 
-      selectedAddressContext = {
-        label: selectedAddress,
-        housenumber: div.dataset.housenumber || "",
-        street: div.dataset.street || "",
-        postcode: div.dataset.postcode || "",
-        city: div.dataset.city || "",
+      const adresse = [div.dataset.housenumber, div.dataset.street].filter(Boolean).join(" ") || selectedAddress;
+      const fallbackQuery = selectedAddress || adresse;
+      const params = {
+        adresse,
+        code_postal: div.dataset.postcode || "",
+        ville: div.dataset.city || "",
+        q: fallbackQuery,
       };
 
-      currentSelection = null;
-      triggerSearch();
+      searchPappers(params, {
+        fallbackParams: fallbackQuery ? { q: fallbackQuery } : undefined,
+      });
     });
 
+    // --- Sélection d'une entreprise ---
     resultsEl.addEventListener("click", (e) => {
-      const div = e.target.closest(".item");
-      if (!div) return;
+  const div = e.target.closest(".item");
+  if (!div) return;
 
-      if (currentSelection && div.dataset.siren === currentSelection.siren) {
-        div.classList.remove("selected-item");
-        currentSelection = null;
-        return;
-      }
+  // Si on clique sur l’entreprise déjà sélectionnée → désélection
+  if (currentSelection && div.dataset.siren === currentSelection.siren) {
+    div.classList.remove("selected-item");
+    currentSelection = null;
+    return;
+  }
 
-      currentSelection = {
-        name: div.dataset.name,
-        siren: div.dataset.siren,
-        activite: div.dataset.activite || "",
-        adresse: div.dataset.adresse || "",
-      };
+  // Nouvelle sélection
+  currentSelection = { 
+  name: div.dataset.name, 
+  siren: div.dataset.siren,
+  activite: div.dataset.activite || "",
+  adresse: div.dataset.adresse || ""
+};
 
-      resultsEl.querySelectorAll(".selected-item").forEach((el) =>
-        el.classList.remove("selected-item")
-      );
-      div.classList.add("selected-item");
-    });
+  // Retire le vert partout et applique seulement au clic
+  resultsEl.querySelectorAll(".selected-item").forEach(el => el.classList.remove("selected-item"));
+  div.classList.add("selected-item");
+});
 
+
+    // --- Soumission du formulaire ---
     document.getElementById("form").addEventListener("submit", async (e) => {
       e.preventDefault();
 
@@ -728,11 +355,11 @@
         alert("Choisis une entreprise");
         return;
       }
-
+      
       const affiliationCode = document.getElementById("affiliation").value;
-      if (!affiliationCode) {
-        alert("Choisis un type d'affiliation");
-        return;
+      if (!affiliationCode) { 
+        alert("Choisis un type d'affiliation"); 
+        return; 
       }
 
       const payload = {
